@@ -53,7 +53,7 @@ try:
         # Hiển thị trạng thái nhanh trên console
         status = "❌ ERROR" if not data['customer_id'] or data['amount'] < 0 else "✅ OK"
         print(f"📡 {status} | Cust: {str(data['customer_id'])[:8]}... | Amount: {data['amount']}", end='\r')
-        time.sleep(0.5)
+        time.sleep(0.05)
 except KeyboardInterrupt:
     print("\n🛑 Đã dừng Producer.")
 finally:
