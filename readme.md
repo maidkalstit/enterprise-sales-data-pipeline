@@ -1,4 +1,4 @@
-# 🚀 Enterprise Sales Data Pipeline on Apache Spark
+# Building and Optimizing an End-to-End Sales Data Pipeline on Apache Spark
 
 <div align="center">
 
