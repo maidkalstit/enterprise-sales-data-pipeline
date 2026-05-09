@@ -1,9 +1,7 @@
 version: '3.8'
 
 services:
-  # ==============================================================================
-  # 1. TẦNG LƯU TRỮ DỮ LIỆU (STORAGE LAYER - POSTGRESQL MULTI-DATABASE)
-  # ==============================================================================
+  # 1. TẦNG LƯU TRỮ DỮ LIỆU (POSTGRESQL)
   postgres-db:
     image: postgres:15-alpine
     container_name: newfolder2-postgres-db-1
@@ -13,7 +11,7 @@ services:
       POSTGRES_DB: sales_db
       TZ: Asia/Ho_Chi_Minh
     ports:
-      - "5433:5432" # Cổng 5433 ra máy Host vật lý, cổng 5432 nội bộ mạng Docker
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     deploy:
@@ -21,9 +19,7 @@ services:
         limits:
           memory: 512M
 
-  # ==============================================================================
-  # 2. TẦNG HÀNG ĐỢI THÔNG ĐIỆP PHÂN PHỐI (INGESTION QUEUE - APACHE KAFKA)
-  # ==============================================================================
+  # 2. TẦNG HÀNG ĐỢI THÔNG ĐIỆP (KAFKA)
   zookeeper:
     image: zookeeper:3.9.2
     container_name: sales_zookeeper
@@ -51,17 +47,18 @@ services:
     depends_on:
       - zookeeper
 
-  # ==============================================================================
-  # 3. TẦNG XỬ LÝ DỮ LIỆU LỚN PHÂN TÁN (COMPUTE ENGINE - APACHE SPARK)
-  # ==============================================================================
+  # 3. TẦNG XỬ LÝ DỮ LIỆU LỚN (SPARK)
   spark-master:
     image: apache/spark:3.5.0
     container_name: newfolder2-spark-master-1
+    environment:
+      - SPARK_MODE=master
+      - SPARK_SUBMIT_PARAMETERS=--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.2
     user: root
     command: sh -c "pip install requests python-dotenv pandas faker && /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master"
     ports:
-      - "8080:8080" # Giao diện Spark Web UI quản trị
-      - "7077:7077" # Cổng phân phối RPC kết nối nội bộ Node
+      - "8080:8080"
+      - "7077:7077"
     volumes:
       - ./src:/opt/spark/src
       - ./data:/opt/spark/data
@@ -84,9 +81,7 @@ services:
       - ./.env:/opt/spark/.env
       - ./logs:/opt/spark/logs
 
-  # ==============================================================================
-  # 4. TẦNG BÁO CÁO THÔNG MINH TRỰC QUAN HÓA (BI SERVING LAYER - METABASE)
-  # ==============================================================================
+  # 4. TẦNG BÁO CÁO TRỰC QUAN (METABASE)
   metabase:
     image: metabase/metabase:latest
     container_name: metabase_analytics
@@ -102,9 +97,7 @@ services:
         limits:
           memory: 2G
 
-  # ==============================================================================
-  # 5. TẦNG ĐIỀU PHỐI VÀ LẬP LỊCH TÁC VỤ (ORCHESTRATION LAYER - APACHE AIRFLOW)
-  # ==============================================================================
+  # 5. TẦNG ĐIỀU PHỐI TÁC VỤ (AIRFLOW)
   airflow-db:
     image: postgres:15-alpine
     container_name: sales_airflow_metadata_db
@@ -137,7 +130,7 @@ services:
       - ./src:/opt/spark/src
       - ./data:/opt/spark/data
       - ./.env:/opt/spark/.env
-      - /var/run/docker.sock:/var/run/docker.sock # Mount Docker socket phục vụ BashOperator điều phối container chéo
+      - /var/run/docker.sock:/var/run/docker.sock
     command: bash -c "chmod 777 /var/run/docker.sock && airflow db init && (airflow users create --username admin --firstname Tung --lastname Dang --role Admin --email tung@dainam.edu.vn --password ${AIRFLOW_ADMIN_PASSWORD:-admin} || true) && airflow webserver"
 
   airflow-scheduler:
@@ -160,9 +153,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     command: bash -c "chmod 777 /var/run/docker.sock && rm -f /opt/airflow/airflow-scheduler.pid && sleep 20 && airflow db migrate && airflow scheduler"
 
-# ==============================================================================
-# PHÂN VÙNG LƯU TRỮ KIÊN ĐỊNH (PERSISTENT VOLUMES MAPPING)
-# ==============================================================================
+# ĐỊNH NGHĨA Ổ ĐĨA ẢO (PERSISTENT VOLUMES)
 volumes:
   postgres_data:
   kafka_data:
