@@ -149,6 +149,7 @@ project-root/
 ├── docker-compose.yaml             # Full infrastructure definition
 ├── Dockerfile.airflow              # Custom Airflow worker image
 └── init-db.sql                     # PostgreSQL schema initialization script
+``` ---
 
 ## 🧪 Quality Assurance & Testing Strategy
 
