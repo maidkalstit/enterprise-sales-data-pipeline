@@ -164,7 +164,8 @@ To maintain pipeline integrity and avoid regressions during refactoring, the rep
 
 A core architectural challenge in a Lambda infrastructure is maintaining analytical alignment between the real-time **Speed Layer** and the exhaustive **Batch Layer**.
 
-![Lambda Reconciliation & Eventual Consistency](images/sodo2.png)
+![Lambda Reconciliation & Eventual Consistency](images/lambda-reconciliation.png)
+*Figure 4: Lambda Reconciliation — Speed Layer divergence vs Batch Layer eventual convergence with idempotent conflict resolution.*
 
 1. Target Synchronization & Convergence
 Real-Time Divergence: Short-term reporting metrics materialized inside gold_minute_revenue provide immediate operational awareness but may exhibit minor discrepancies due to unexpected network jitter, late-arriving packets, or un-enriched partial events.
