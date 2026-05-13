@@ -233,6 +233,8 @@ Access the UI at http://localhost:8085 (admin/admin) and unpause:
 sales_batch_optimization_v1
 
 automated_data_recovery_job
+```
+---
 
 ##🐛 Troubleshooting
 Cause: Default Spark Docker image omits the JDK jps utility.
@@ -265,7 +267,7 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 ## 🤝 Contributing
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-👤 Author
+##👤 Author
 Đặng Bùi Thanh Tùng Final-year student — Data Engineering · Faculty of Information Technology · Dai Nam University
 
 This project serves as the capstone of my Data Engineering studies and as a stepping stone toward my career as a professional Data Engineer
