@@ -61,7 +61,7 @@ Optimized for high volume, auditability, and data reconciliation. It enforces sc
 ### 2. The Speed Layer (Real-Time Streaming Pipeline)
 Optimized for sub-second latency. It enriches raw transaction streams on the fly and triggers event-driven notifications for critical business actions.
 
-![Streaming Processing Pipeline](images/luongsteam.png)
+![Streaming Processing Pipeline](images/luongstream.png)
 *Figure 3: Real-time event consumption, metadata lookup enrichment, and commit-driven VIP alerting.*
 
 **Execution Lifecycle:**
@@ -164,7 +164,7 @@ To maintain pipeline integrity and avoid regressions during refactoring, the rep
 
 A core architectural challenge in a Lambda infrastructure is maintaining analytical alignment between the real-time **Speed Layer** and the exhaustive **Batch Layer**.
 
- ![Lambda Reconciliation & Eventual Consistency](images/sodo2.png)
+![Lambda Reconciliation & Eventual Consistency](images/sodo2.png)
 
 1. Target Synchronization & Convergence
 Real-Time Divergence: Short-term reporting metrics materialized inside gold_minute_revenue provide immediate operational awareness but may exhibit minor discrepancies due to unexpected network jitter, late-arriving packets, or un-enriched partial events.
