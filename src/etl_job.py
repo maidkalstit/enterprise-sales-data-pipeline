@@ -12,7 +12,7 @@ Khác bản cũ (đọc CSV → ghi thẳng gold bằng mode="overwrite"):
 """
 import pyspark.sql.functions as F
 from pyspark.sql import SparkSession
-from pyspark.sql.types import DoubleType, StringType, StructField, StructType
+from pyspark.sql.types import DecimalType, StringType, StructField, StructType
 
 from db_utils import atomic_swap_gold, load_db_config
 from notify import send_env_bot
@@ -28,11 +28,12 @@ spark = SparkSession.builder \
     .getOrCreate()
 
 # Schema thống nhất với payload JSON đang persist ở Bronze
+# amount parse TRỰC TIẾP DECIMAL(12,2) — tiền không đi qua float ở bất kỳ bước nào
 event_schema = StructType([
     StructField("order_id", StringType(), True),
     StructField("customer_id", StringType(), True),
     StructField("product_id", StringType(), True),
-    StructField("amount", DoubleType(), True),
+    StructField("amount", DecimalType(12, 2), True),
     StructField("order_date", StringType(), True),
 ])
 

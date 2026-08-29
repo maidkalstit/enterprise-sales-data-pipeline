@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 import pyspark.sql.functions as F
 from dotenv import load_dotenv
 from pyspark.sql import SparkSession
-from pyspark.sql.types import DoubleType, StringType, StructField, StructType
+from pyspark.sql.types import DecimalType, StringType, StructField, StructType
 
 from db_utils import load_db_config, upsert_gold_minute_rows, upsert_silver_rows
 from notify import send_telegram
@@ -68,7 +68,7 @@ schema = StructType([
     StructField("order_id", StringType(), True),
     StructField("customer_id", StringType(), True),
     StructField("product_id", StringType(), True),
-    StructField("amount", DoubleType(), True),
+    StructField("amount", DecimalType(12, 2), True),  # tiền parse thẳng DECIMAL, không qua float
     StructField("order_date", StringType(), True),
 ])
 

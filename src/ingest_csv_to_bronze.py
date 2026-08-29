@@ -8,7 +8,7 @@ Batch Layer chỉ cần đọc một chỗ.
 """
 import pyspark.sql.functions as F
 from pyspark.sql import SparkSession
-from pyspark.sql.types import DoubleType, StringType, StructField, StructType
+from pyspark.sql.types import DecimalType, StringType, StructField, StructType
 
 from db_utils import load_db_config
 
@@ -25,11 +25,12 @@ CSV_PATH = "/opt/spark/data/sales_data.csv"
 
 # Schema khớp ĐÚNG tên cột của file Landing (hết cảnh lệch vị trí cột âm thầm
 # — bản cũ khai 'order_date' cho cột 'timestamp' và sống nhờ khớp theo vị trí)
+# amount đọc thẳng DECIMAL(12,2) — CSV landing cũng không cho float chạm tiền
 landing_schema = StructType([
     StructField("order_id", StringType(), True),
     StructField("product_id", StringType(), True),
     StructField("customer_id", StringType(), True),
-    StructField("amount", DoubleType(), True),
+    StructField("amount", DecimalType(12, 2), True),
     StructField("timestamp", StringType(), True),
 ])
 
