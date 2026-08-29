@@ -1,104 +1,132 @@
-import os
-import sys
+"""
+Batch ETL — thực thi Medallion đúng nghĩa: Bronze → Silver → Gold.
+
+Khác bản cũ (đọc CSV → ghi thẳng gold bằng mode="overwrite"):
+  1. Đọc dữ liệu ĐÃ TÍCH LŨY từ raw_sales_events (Bronze) — điểm hội tụ của cả
+     stream lẫn CSV landing, hết cảnh "Gold chỉ còn snapshot 10 phút".
+  2. Ghi bản ghi sạch vào Silver clean_sales_events bằng append-các-dòng-mới
+     (left_anti-join theo order_id) — idempotent, chạy lại không nhân đôi.
+  3. Gold được TÍNH LẠI từ Silver, ghi vào bảng staging rồi atomic swap trong
+     một transaction — Primary Key được bảo toàn, Metabase không bao giờ thấy
+     bảng rỗng lửng (mode="overwrite" cũ từng DROP table và xé mất PK).
+"""
+import pyspark.sql.functions as F
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lit, expr, current_timestamp, to_timestamp
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType
-from dotenv import load_dotenv
+from pyspark.sql.types import DoubleType, StringType, StructField, StructType
 
-# ==============================================================================
-# 1. NẠP CẤU HÌNH VÀ KIỂM TRA PHÒNG THỦ (DEFENSIVE CHECK)
-# ==============================================================================
-load_dotenv(dotenv_path="/opt/spark/.env")
+from db_utils import atomic_swap_gold, load_db_config
+from notify import send_env_bot
+from transforms import aggregate_gold_daily, split_quality
 
-db_url = os.getenv("DB_URL")
-db_user = os.getenv("DB_USER")
-db_pass = os.getenv("DB_PASS")
-db_driver = os.getenv("DB_DRIVER")
+cfg = load_db_config()
+db_url = cfg["DB_URL"]
+jdbc_props = {"user": cfg["DB_USER"], "password": cfg["DB_PASS"], "driver": cfg["DB_DRIVER"]}
 
-if not all([db_url, db_user, db_pass, db_driver]):
-    print("💥 Lỗi hệ thống: Không thể nạp đầy đủ các biến môi trường cấu hình kết nối.")
-    sys.exit(1)
-
-# Khởi tạo Spark Session tích hợp tham số tối ưu hóa phân vùng tính toán
 spark = SparkSession.builder \
-    .appName("Sales_Batch_ETL_With_Parquet_Optimization") \
+    .appName("Sales_Batch_ETL_Medallion") \
     .config("spark.sql.shuffle.partitions", "4") \
     .getOrCreate()
 
-props = {"user": db_user, "password": db_pass, "driver": db_driver}
-
-# Định nghĩa cấu trúc Schema chuẩn hóa 5 trường thông tin
-schema = StructType([
+# Schema thống nhất với payload JSON đang persist ở Bronze
+event_schema = StructType([
     StructField("order_id", StringType(), True),
     StructField("customer_id", StringType(), True),
     StructField("product_id", StringType(), True),
     StructField("amount", DoubleType(), True),
-    StructField("order_date", StringType(), True)
+    StructField("order_date", StringType(), True),
 ])
 
-csv_source_path = "/opt/spark/data/sales_data.csv"
-parquet_destination_path = "/opt/spark/data/sales_data.parquet"
+bronze_count = new_count = err_count = gold_rows = 0
 
 try:
-    # ==============================================================================
-    # 2. CÔNG ĐOẠN TỐI ƯU LƯU TRỮ (STORAGE FORMAT OPTIMIZATION)
-    # ==============================================================================
-    print("📥 Tiến hành đọc dữ liệu thô đầu vào từ tệp tĩnh CSV...")
-    raw_csv_df = spark.read.format("csv") \
-        .option("header", "true") \
-        .schema(schema) \
-        .load(csv_source_path)
+    # ------------------------------------------------------------------
+    # 1. BRONZE — nguồn tích lũy, bất biến
+    # ------------------------------------------------------------------
+    print("📥 [1/5] Đọc dữ liệu thô tích lũy từ Bronze (raw_sales_events)...")
+    bronze_df = spark.read.jdbc(url=db_url, table="raw_sales_events", properties=jdbc_props)
+    bronze_count = bronze_df.count()
 
-    print("⚡ Thực thi chuyển đổi định dạng: CSV -> Parquet Columnar (Nén Snappy)...")
-    raw_csv_df.write.format("parquet") \
-        .mode("overwrite") \
-        .option("compression", "snappy") \
-        .save(parquet_destination_path)
-    print(f"📊 Tệp Parquet tối ưu định dạng cột đã được lưu kho tại: {parquet_destination_path}")
+    if bronze_count == 0:
+        print("ℹ️ Bronze rỗng (chưa bơm dữ liệu) — giữ nguyên Gold, kết thúc lượt chạy.")
+    else:
+        parsed_df = (
+            bronze_df.select(F.from_json(F.col("payload"), event_schema).alias("data"))
+            .select("data.*")
+        )
+        clean_df, error_df = split_quality(parsed_df, source_type="Batch")
+        clean_df.cache()
+        error_df.cache()
 
-    # ==============================================================================
-    # 3. TRÍCH XUẤT VÀ ÁP DỤNG QUY TẮC KIỂM THỬ CHẤT LƯỢNG (TRANSFORMATION)
-    # ==============================================================================
-    print("🚀 Nạp dữ liệu từ nguồn Parquet đã tối ưu hóa để phân tách chất lượng...")
-    optimized_df = spark.read.format("parquet").load(parquet_destination_path)
+        # --------------------------------------------------------------
+        # 2. SILVER — chỉ append những order_id chưa tồn tại (idempotent)
+        # --------------------------------------------------------------
+        print("🧹 [2/5] Silver: tách bản ghi sạch và ghi bổ sung các đơn chưa có...")
+        existing_ids = (
+            spark.read.jdbc(url=db_url, table="clean_sales_events", properties=jdbc_props)
+            .select("order_id")
+        )
+        new_clean = (
+            clean_df.dropDuplicates(["order_id"])
+            .join(existing_ids, on="order_id", how="left_anti")
+        )
+        new_count = new_clean.count()
+        if new_count > 0:
+            (
+                new_clean.select("order_id", "customer_id", "product_id", "amount", "order_date")
+                .write.jdbc(url=db_url, table="clean_sales_events", mode="append", properties=jdbc_props)
+            )
+        print(f"🥈 Silver: đã append {new_count} dòng sạch mới (khóa order_id).")
 
-    # TẦNG SILVER: Lọc các bản ghi sạch đạt chuẩn doanh nghiệp
-    clean_batch_df = optimized_df.filter(
-        col("customer_id").isNotNull() & (col("amount") > 0) & (col("order_id") != "")
-    ).withColumn("order_date", to_timestamp(col("order_date")))
+        # --------------------------------------------------------------
+        # 3. DLQ — cô lập và tích lũy dòng lỗi phục vụ hậu kiểm
+        # --------------------------------------------------------------
+        err_count = error_df.count()
+        if err_count > 0:
+            (
+                error_df.withColumn("created_at", F.current_timestamp())
+                .select(
+                    "order_id", "customer_id", "product_id", "amount",
+                    "order_date", "error_reason", "source_type", "created_at",
+                )
+                .write.jdbc(url=db_url, table="error_logs", mode="append", properties=jdbc_props)
+            )
+        print(f"⚠️ DLQ: đã ghi {err_count} dòng dị thường vào error_logs.")
 
-    # TẦNG DEAD LETTER QUEUE (DLQ): Cô lập các bản ghi rác, gắn nhãn nguồn phát 'Batch'
-    error_batch_df = optimized_df.filter(
-        col("customer_id").isNull() | (col("amount") <= 0) | (col("order_id") == "")
-    ).withColumn("error_reason", expr("""
-        CASE 
-            WHEN customer_id IS NULL THEN 'Missing Customer ID'
-            WHEN amount <= 0 THEN 'Invalid Amount'
-            WHEN order_id = '' THEN 'Missing Order ID'
-            ELSE 'Schema Mismatch Exception'
-        END
-    """)).withColumn("source_type", lit("Batch")) \
-       .withColumn("order_date", to_timestamp(col("order_date"))) \
-       .withColumn("created_at", current_timestamp())
+        # --------------------------------------------------------------
+        # 4. GOLD — tính lại từ Silver (bao gồm cả dòng đã recovery), atomic swap
+        # --------------------------------------------------------------
+        print("📊 [4/5] Gold: tính lại (report_date, product) từ Silver rồi atomic swap...")
+        silver_df = spark.read.jdbc(url=db_url, table="clean_sales_events", properties=jdbc_props)
+        gold_agg = aggregate_gold_daily(silver_df)
+        gold_rows = gold_agg.count()
+        if gold_rows > 0:
+            gold_agg.write.jdbc(
+                url=db_url, table="gold_batch_revenue_staging",
+                mode="overwrite", properties=jdbc_props,
+            )
+            atomic_swap_gold(cfg)
+            print(f"✅ Gold: atomic swap hoàn tất với {gold_rows} dòng (ngày, sản phẩm) — PK nguyên vẹn.")
+        else:
+            print("ℹ️ Silver rỗng sau lọc — bỏ qua swap để không xóa trắng Gold.")
 
-    # ==============================================================================
-    # 4. GHI DỮ LIỆU ĐÍCH (LOADING LAYER - POSTGRESQL JDBC WRITE)
-    # ==============================================================================
-    print("💾 Đang đồng bộ và thực thi tác vụ nạp dữ liệu xuống cơ sở dữ liệu...")
+        # --------------------------------------------------------------
+        # 5. BÁO CÁO — post-commit notification (trước đây báo trước ETL, sai story)
+        # --------------------------------------------------------------
+        report = (
+            "🚀 *[BATCH ETL REPORT]*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🥇 Bronze: `{bronze_count}` dòng thô tích lũy\n"
+            f"🥈 Silver: `+{new_count}` dòng sạch mới\n"
+            f"⚠️ DLQ: `+{err_count}` dị thường\n"
+            f"📊 Gold: `{gold_rows}` dòng (ngày, sản phẩm) — atomic swap OK\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "👤 Engineer: `Tung Dang`"
+        )
+        send_env_bot("BATCH", report)
+        print("📨 Đã gửi báo cáo Telegram (BATCH bot).")
 
-    # 🔥 CHIẾN LƯỢC TỐI ƯU IDEMPOTENCY: Sử dụng mode("overwrite") cho bảng doanh thu Batch
-    # Giúp hệ thống thoải mái chạy 10 phút một lần mà không bị nhân đôi hoặc sai lệch số liệu
-    if clean_batch_df.count() > 0:
-        clean_batch_df.write.jdbc(url=db_url, table="gold_batch_revenue", mode="overwrite", properties=props)
-        print(f"✅ Thành công: Đã ghi đè cập nhật snapshot {clean_batch_df.count()} bản ghi sạch vào Gold Layer.")
-
-    # Sử dụng mode("append") cho error_logs để tích lũy dữ liệu rác phục vụ hậu kiểm
-    if error_batch_df.count() > 0:
-        error_batch_df.write.jdbc(url=db_url, table="error_logs", mode="append", properties=props)
-        print(f"⚠️ Cảnh báo DLQ: Đã tích lũy thêm {error_batch_df.count()} bản ghi dị thường vào error_logs.")
-
-except Exception as e:
-    print(f"💥 Lỗi nghiêm trọng phát sinh trong tiến trình Batch ETL Pipeline: {e}")
+except Exception as exc:
+    print(f"💥 Lỗi nghiêm trọng phát sinh trong tiến trình Batch ETL: {exc}")
 
 finally:
     spark.stop()

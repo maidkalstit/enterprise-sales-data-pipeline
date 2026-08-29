@@ -1,101 +1,69 @@
-import os
-import sys
+"""
+DLQ Recovery Job — quét error_logs theo VÒNG ĐỜI (cột status), hết thời DELETE mù
+quáng theo error_reason (cách cũ có race: dòng lỗi mới lọt giữa lúc đọc và lúc
+xóa sẽ biến mất mà không được khôi phục).
 
-# Tự động nạp thư viện điều khiển cơ sở dữ liệu gốc nếu môi trường Docker chưa tích hợp
-try:
-    import psycopg2
-except ImportError:
-    os.system("pip install psycopg2-binary --quiet")
-    import psycopg2
+Quy trình:
+  1. Đọc các dòng status = 'unprocessed' AND error_reason = 'Invalid Amount'.
+  2. Amount GIỮ NGUYÊN DẤU (âm = refund/hoàn tiền — nghiệp vụ hợp lệ), UPSERT vào
+     Silver clean_sales_events. (Bản cũ ép về 0 gọi là "đơn khuyến mãi" — làm
+     méo doanh thu thực.)
+  3. Tính lại cửa sổ 1 phút × product và UPSERT vào gold_minute_revenue.
+  4. Đánh dấu 'processed' cho đúng bộ id đã đọc — lần chạy sau không đụng lại.
 
+Dòng 'Missing Customer ID' / 'Missing Order ID' ở lại 'unprocessed' chờ con người
+— DLQ là hàng đợi công việc, không phải bãi rác vô định.
+"""
+import pyspark.sql.functions as F
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lit, when, to_timestamp, window, sum
-from dotenv import load_dotenv
 
-# ==============================================================================
-# 1. NẠP CẤU HÌNH VÀ KIỂM TRA PHÒNG THỦ (DEFENSIVE CHECK)
-# ==============================================================================
-load_dotenv(dotenv_path="/opt/spark/.env")
+from db_utils import load_db_config, mark_errors_processed, upsert_gold_minute_rows, upsert_silver_rows
+from transforms import aggregate_gold_minute
 
-db_url = os.getenv("DB_URL")
-db_user = os.getenv("DB_USER")
-db_pass = os.getenv("DB_PASS")
-db_driver = os.getenv("DB_DRIVER")
+cfg = load_db_config()
+db_url = cfg["DB_URL"]
+jdbc_props = {"user": cfg["DB_USER"], "password": cfg["DB_PASS"], "driver": cfg["DB_DRIVER"]}
 
-if not all([db_url, db_user, db_pass, db_driver]):
-    print("💥 Lỗi nghiêm trọng: Các biến cấu hình kết nối từ tệp .env đang bị trống.")
-    sys.exit(1)
-
-# Khởi tạo Spark Session độc lập cho tiến trình xử lý khôi phục định kỳ
 spark = SparkSession.builder \
-    .appName("Data_Recovery_Batch_Job") \
+    .appName("DLQ_Recovery_Job") \
+    .config("spark.sql.shuffle.partitions", "4") \
     .getOrCreate()
 
-props = {"user": db_user, "password": db_pass, "driver": db_driver}
-print("🔍 Đã thiết lập kết nối an toàn. Bắt đầu quét Metadata từ bảng chứa lỗi tập trung...")
-
 try:
-    # --------------------------------------------------------------------------
-    # BƯỚC 1: TRÍCH XUẤT (EXTRACT) DỮ LIỆU TỪ BẢNG CHỨA LỖI (DLQ)
-    # --------------------------------------------------------------------------
-    errors_df = spark.read.jdbc(url=db_url, table="error_logs", properties=props)
-    record_count = errors_df.count()
+    print("🔍 Quét DLQ: status = 'unprocessed' AND error_reason = 'Invalid Amount'...")
+    recovered = (
+        spark.read.jdbc(url=db_url, table="error_logs", properties=jdbc_props)
+        .filter(
+            (F.col("status") == "unprocessed")
+            & (F.col("error_reason") == "Invalid Amount")
+            & F.col("order_id").isNotNull()
+            & (F.col("order_id") != "")
+        )
+        .withColumn("order_date", F.to_timestamp(F.col("order_date")))
+        .select("id", "order_id", "customer_id", "product_id", "amount", "order_date")
+    )
+    rows = [row.asDict() for row in recovered.collect()]
 
-    if record_count > 0:
-        # --------------------------------------------------------------------------
-        # BƯỚC 2: BIẾN ĐỔI VÀ HOÀN THIỆN CẤU TRÚC (TRANSFORM)
-        # --------------------------------------------------------------------------
-        # Sửa đổi logic: Lọc đơn hàng âm tiền (Invalid Amount), đưa giá trị về 0 và chuyển sang dạng Timestamp
-        recovered_df = errors_df.filter(col("error_reason") == 'Invalid Amount') \
-            .withColumn("amount", when(col("amount") < 0, lit(0)).otherwise(col("amount"))) \
-            .withColumn("event_time", to_timestamp(col("order_date")))
-
-        target_recovery_count = recovered_df.count()
-        
-        if target_recovery_count > 0:
-            # Tái tính toán tích lũy doanh thu bổ sung theo cửa sổ thời gian 1 phút
-            gold_recovery = recovered_df.groupBy(window(col("event_time"), "1 minute")) \
-                .agg(sum("amount").alias("total_revenue")) \
-                .select("window.start", "window.end", "total_revenue")
-
-            # --------------------------------------------------------------------------
-            # BƯỚC 3: ĐỔ DỮ LIỆU (LOAD) VÀO TẦNG GOLD ĐÍCH
-            # --------------------------------------------------------------------------
-            gold_recovery.write.jdbc(url=db_url, table="gold_minute_revenue", mode="append", properties=props)
-            print(f"✅ TÁC VỤ SPARK HOÀN THÀNH: Quy trình xử lý lỗi kết thúc thành công. Đã tái cấu trúc: {target_recovery_count} bản ghi.")
-
-            # --------------------------------------------------------------------------
-            # BƯỚC 4: TIẾN TRÌNH DATA PURGE (XÓA RÁC CŨ ĐỂ ĐẢM BẢO TÍNH IDEMPOTENCY)
-            # --------------------------------------------------------------------------
-            print("🗑️ Đang tiến hành dọn dẹp sạch sẽ kho chứa rác cũ tại bảng error_logs...")
-            
-            # Khởi tạo kết nối native vào mạng nội bộ của container Postgres để thực thi lệnh DELETE
-            conn = psycopg2.connect(
-                host="postgres-db",
-                database="sales_db",
-                user=db_user,
-                password=db_pass,
-                port="5432"
-            )
-            cursor = conn.cursor()
-            
-            # Xóa các bản ghi lỗi 'Invalid Amount' đã được Spark xử lý khôi phục thành công ở trên
-            delete_query = "DELETE FROM error_logs WHERE error_reason = 'Invalid Amount';"
-            cursor.execute(delete_query)
-            conn.commit()
-            
-            print(f"🧹 DATA PURGE HOÀN THÀNH: Bảng error_logs đã được làm sạch tuyệt đối.")
-            cursor.close()
-            conn.close()
-
-        else:
-            print("ℹ️ Kết thúc tác vụ: Không tìm thấy thực thể dữ liệu lỗi nào phù hợp tiêu chí làm sạch.")
+    if not rows:
+        print("✨ Không có gì để khôi phục — DLQ sạch hoặc chỉ còn lỗi cần con người duyệt.")
     else:
-        print("✨ Trạng thái: Kho dữ liệu lỗi trống. Hệ thống Ingestion chính vận hành đạt độ toàn vẹn tối ưu.")
+        # 2. SILVER — amount giữ nguyên dấu: âm tiền là hoàn tiền, cộng vào tổng đúng ngữ nghĩa
+        silver_rows = [{k: v for k, v in row.items() if k != "id"} for row in rows]
+        upsert_silver_rows(cfg, silver_rows)
+        print(f"🥈 Silver: UPSERT {len(silver_rows)} dòng đã khôi phục (giữ dấu gốc = refund).")
 
-except Exception as e:
-    print(f"💥 Lỗi phát sinh trong quá trình vận hành Batch Job: {e}")
+        # 3. GOLD-MINUTE — cập nhật view vận tốc cho Metabase nhìn thấy ngay
+        gold_rows = [row.asDict() for row in aggregate_gold_minute(recovered).collect()]
+        upsert_gold_minute_rows(cfg, gold_rows)
+        print(f"🥇 Gold-minute: UPSERT {len(gold_rows)} dòng (cửa sổ, product).")
+
+        # 4. ĐÓNG VÒNG ĐỜI — chỉ đúng bộ id đã đọc, hết race condition
+        ids = [row["id"] for row in rows]
+        mark_errors_processed(cfg, ids)
+        print(f"🗑️ Vòng đời hoàn tất: đã đánh dấu 'processed' cho {len(ids)} dòng DLQ.")
+
+except Exception as exc:
+    print(f"💥 Lỗi phát sinh trong quá trình vận hành Recovery Job: {exc}")
 
 finally:
-    # Giải phóng tài nguyên bộ nhớ
     spark.stop()
