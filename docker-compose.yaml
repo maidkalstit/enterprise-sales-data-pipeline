@@ -68,6 +68,19 @@ services:
         limits:
           memory: 1G
 
+  # Tạo topic một lần mỗi lần `up` (idempotent) — streaming job khởi động trước
+  # producer sẽ không còn gặp lỗi "topic not found" như lần chạy thử đầu tiên
+  kafka-init:
+    image: apache/kafka:3.7.0
+    container_name: sales_kafka_topic_init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - "/opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic ${KAFKA_TOPIC:-sales_topic} --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1"
+    restart: "no"
+
   # 3. TẦNG XỬ LÝ DỮ LIỆU LỚN (SPARK) — image bake sẵn deps (Dockerfile.spark)
   spark-master:
     build:
@@ -116,10 +129,12 @@ services:
       - ./logs:/opt/spark/logs
       - ./checkpoints:/opt/spark/checkpoints
     restart: unless-stopped
+    # Worker chỉ idle trong setup này: các job chạy local[*] trên master container
+    # (spark-submit không truyền --master) — cap 1G để tiết kiệm RAM cho host 16GB
     deploy:
       resources:
         limits:
-          memory: 1.5G
+          memory: 1G
 
   # 4. TẦNG BÁO CÁO TRỰC QUAN (METABASE)
   metabase:
@@ -129,14 +144,15 @@ services:
       - "3000:3000"
     environment:
       TZ: Asia/Ho_Chi_Minh
-      JAVA_OPTS: "-Xmx1500m"
+      # Heap 1G đủ cho dashboard demo — bản 1500m từng chèn áp lực lên host 16GB
+      JAVA_OPTS: "-Xmx1g"
     volumes:
       - metabase_data:/metabase.db
     restart: unless-stopped
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 1536M
 
   # 5. TẦNG ĐIỀU PHỐI TÁC VỤ (AIRFLOW)
   airflow-db:

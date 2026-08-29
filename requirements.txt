@@ -8,14 +8,14 @@
 # ==============================================================================
 
 # --- Runtime: Kafka producer (chạy được cả trong container lẫn trên host)
-kafka-python==2.3.1
-python-dotenv==1.2.2
+kafka-python==2.0.2
+python-dotenv==1.0.1
 
 # --- Runtime: bên trong Spark container (Dockerfile.spark cài nhóm này)
-requests==2.33.1
+requests==2.32.4
 psycopg2-binary==2.9.10
-pandas==2.2.3
-faker==40.15.0
+pandas==2.0.3
+faker==33.3.1
 
 # --- Dev / Test (Spark local session + pytest + so sánh DataFrame)
 pyspark==3.5.1
