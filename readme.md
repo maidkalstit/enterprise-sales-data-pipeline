@@ -1,17 +1,19 @@
-# Building and Optimizing an End-to-End Sales Data Pipeline on Apache Spark
+# Building an End-to-End Sales Data Pipeline on Apache Spark (Medallion / Lambda)
 
 <div align="center">
 
 [![Apache Spark](https://img.shields.io/badge/Apache%20Spark-3.5.0-E25A1C?style=for-the-badge&logo=apachespark&logoColor=white)](https://spark.apache.org/)
-[![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-3.7.0-231F20?style=for-the-badge&logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
-[![Apache Airflow](https://img.shields.io/badge/Apache%20Airflow-2.9.0-017CEE?style=for-the-badge&logo=apacheairflow&logoColor=white)](https://airflow.apache.org/)
+[![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-3.7.0%20(KRaft)-231F20?style=for-the-badge&logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
+[![Apache Airflow](https://img.shields.io/badge/Apache%20Airflow-2.9.1-017CEE?style=for-the-badge&logo=apacheairflow&logoColor=white)](https://airflow.apache.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15--alpine-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Docker](https://img.shields.io/badge/Docker-Compose%203.8-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
 
-*A production-grade Lambda Architecture data pipeline for real-time and batch processing of large-scale sales transactions.*
+*A Lambda Architecture data pipeline with a fully implemented Medallion storage
+layer (Bronze → Silver → Gold) for real-time and batch processing of sales transactions.*
 
-[Architecture](#-system-architecture) · [Pipelines](#-deep-dive-processing-flows) · [Features](#-core-features) · [Quick Start](#-quick-start) · [Deployment](#-deployment-guide) · [Optimization](#-optimizations)
+[Architecture](#-system-architecture) · [Pipelines](#-deep-dive-processing-flows) · [Features](#-core-features) · [Data Quality](#-data-quality--dlq-lifecycle) · [Quick Start](#-quick-start) · [Testing](#-quality-assurance--testing)
 
 </div>
 
@@ -19,108 +21,156 @@
 
 ## 📌 Overview
 
-This system is designed to **ingest, validate, transform, and aggregate** high-volume sales transaction data from decentralized sources. It implements the **Lambda Architecture** — combining a real-time **Streaming Pipeline** and a periodic **Batch Pipeline** on **Apache Spark** — with storage organized using the **Medallion Architecture** (Bronze → Silver → Gold) inside PostgreSQL. The entire infrastructure is containerized with **Docker** for high availability and horizontal scalability.
+This system **ingests, validates, transforms, and aggregates** sales transaction
+data from two converging sources. It implements the **Lambda Architecture** — a
+real-time **Speed Layer** and a periodic **Batch Layer** on Apache Spark — with
+storage organized using the **Medallion Architecture** inside PostgreSQL:
+
+| Layer | Table | Who writes | Who reads |
+|---|---|---|---|
+| **Bronze** | `raw_sales_events` | Streaming (raw Kafka JSON) + Batch (CSV landing ingest) | Batch ETL |
+| **Silver** | `clean_sales_events` | Streaming (UPSERT by `order_id`) + Batch (append new IDs) | Batch Gold aggregation |
+| **Gold (Speed)** | `gold_minute_revenue` | Streaming + DLQ recovery (UPSERT by window × product) | Metabase |
+| **Gold (Batch)** | `gold_batch_revenue` | Batch ETL (recomputed from Silver, atomic swap) | Metabase — **Source of Truth** |
+| **DLQ** | `error_logs` | Both layers (append, with lifecycle `status`) | Recovery DAG |
+
+Everything runs containerized with Docker Compose (Kafka in KRaft mode — no Zookeeper).
 
 ---
 
 ## 🏗 System Architecture
 
-The system runs two parallel processing tracks, ensuring data is both immediately available for real-time alerting and fully reconciled for financial auditing.
-
 ![Overall System Architecture](images/sodo.png)
-*Figure 1: Overall Lambda and Medallion Architecture showing the convergence of Speed and Batch layers.*
 
 ### Global Lifecycle & Data Flow
 
-| Stage | Component | Technical Execution |
+| Stage | Component | What actually happens |
 |---|---|---|
-| **Generation** | `data_producer.py` | Continuously emits JSON transaction events `{order_id, customer_id, product_id, amount, order_date}` with intentional dirty data injection. |
-| **Ingestion** | Apache Kafka | Acts as a high-throughput buffer for raw streaming events inside the `sales_topic`. |
-| **Storage** | PostgreSQL (Medallion) | **Bronze** (Raw First Persistence) → **Silver** (Cleaned/Validated) → **Gold** (Aggregated KPIs) + **DLQ** (`error_logs`). |
-| **Orchestration** | Apache Airflow | Schedules periodic Batch ETL runs and manages automated DLQ error recovery loops. |
-| **Serving** | Metabase / Telegram | BI Dashboards via Metabase engine; Event-driven VIP/System alerts delivered via Telegram Bots. |
+| **Generation** | `data_producer.py` | Emits JSON events keyed by `customer_id` (ordering per customer), `acks=all`, with deliberate dirty-data injection (~6%). |
+| **Ingestion** | Apache Kafka (KRaft) | `sales_topic` buffers raw events between producer and Spark. |
+| **Bronze** | `raw_sales_events` | Streaming persists every raw payload verbatim; the batch DAG also ingests the static CSV landing file into the same table. |
+| **Silver** | `clean_sales_events` | Validated records, deduplicated by `order_id` — written idempotently by both layers. |
+| **Gold** | `gold_minute_revenue`, `gold_batch_revenue` | Minute-grain speed view and date-grain batch view (see [Reconciliation](#%EF%B8%8F-lambda-reconciliation)). |
+| **Orchestration** | Apache Airflow | Batch pipeline every 10 min; DLQ recovery every 15 min. |
+| **Serving** | Metabase / Telegram | BI dashboards; batched VIP alerts via the Streaming bot, ETL reports via the Batch bot. |
 
 ---
 
 ## 🔍 Deep Dive: Processing Flows
 
-To handle the trade-offs between processing latency and data completeness, the ingestion logic is strictly decoupled into distinct operational pipelines.
+### 1. The Speed Layer (Real-Time Streaming) — `spark_streaming_job.py`
 
-### 1. The Batch Layer (High-Fidelity Historical Pipeline)
-Optimized for high volume, auditability, and data reconciliation. It enforces schema validation and applies column-based conversion prior to loading into the Medallion structures.
+Five concurrent streaming queries over one Kafka source, each with its own
+checkpoint on a mounted volume and a 10-second micro-batch trigger:
 
-![Batch Processing Pipeline](images/luongbatch.png)
-*Figure 2: Sequence of the Batch processing execution strictly following the CSV → Parquet → Gold Medallion flow.*
+| # | Circuit | Sink |
+|---|---|---|
+| 0 | **Bronze** — raw JSON persisted verbatim (re-processable at any time) | `raw_sales_events` (append) |
+| 1 | **Silver** — clean records UPSERTed by `order_id` | `clean_sales_events` |
+| 2 | **Gold** — revenue per (1-minute window × product), UPSERT by table PK | `gold_minute_revenue` |
+| 3 | **Alert** — orders > $1000, aggregated per micro-batch into one Telegram POST | Streaming bot |
+| 4 | **DLQ** — malformed records with classified reasons | `error_logs` (append) |
 
-**Execution Lifecycle:**
-1. **Landing:** Static transaction logs (`sales_data.csv`) land in the local storage volume.
-2. **Silver Conversion:** Spark engine reads the raw CSV and writes an optimized, Snappy-compressed columnar snapshot (`sales_data.parquet`) to disk to optimize subsequent I/O.
-3. **Gold Aggregation:** Spark applies business rules on the Silver Parquet file, filtering malformed rows to the Dead Letter Queue (`error_logs`) and overwriting aggregated revenue metrics to the Gold PostgreSQL table.
-4. **Post-Commit Notification:** Upon successful database write transactions, Airflow triggers operational report summaries via the Telegram Bot.
-
-### 2. The Speed Layer (Real-Time Streaming Pipeline)
-Optimized for sub-second latency. It enriches raw transaction streams on the fly and triggers event-driven notifications for critical business actions.
+All writes are **idempotent**: losing a checkpoint and replaying from the
+earliest offset re-UPSERTs the same keys instead of duplicating data.
 
 ![Streaming Processing Pipeline](images/luongstream.png)
-*Figure 3: Real-time event consumption, metadata lookup enrichment, and commit-driven VIP alerting.*
 
-**Execution Lifecycle:**
-1. **Consumption:** `spark_streaming_job.py` consumes JSON payloads from Kafka micro-batches.
-2. **First Persistence:** Raw streams are directly logged into the PostgreSQL Bronze table to guarantee re-processability.
-3. **Enrichment & Routing:** Spark joins incoming streams with static catalog metadata (`product_info.csv`). Validated records pass to the Gold Layer, while anomalies are isolated into the DLQ.
-4. **Event-Driven Alerting:** Immediately following a successful transaction commit to the Gold layer, high-value orders (`amount > $1000`) trigger batched HTTP payloads to the Telegram VIP channel.
+### 2. The Batch Layer (High-Fidelity Historical Pipeline) — `etl_job.py`
+
+Airflow DAG `sales_batch_optimization_v1`, every 10 minutes:
+
+1. **Metadata** — `gen_product_metadata.py` is *idempotent*: the catalog is created
+   once and never regenerated (product names no longer drift between runs).
+2. **Landing** — `gen_data.py` writes a fresh `sales_data.csv`.
+3. **Landing → Bronze** — `ingest_csv_to_bronze.py` converts the CSV to the same
+   JSON payload shape as the stream and appends it to Bronze. This is what makes
+   batch/stream convergence real: **both sources meet in one Bronze table**.
+4. **Batch ETL** — reads Bronze (not the CSV), routes clean records into Silver
+   (append only new `order_id`s via anti-join), isolates errors into the DLQ,
+   then **recomputes Gold from Silver** and swaps it in atomically:
+
+```
+gold_agg  →  gold_batch_revenue_staging  →  [BEGIN; DELETE gold; INSERT..SELECT; COMMIT]
+```
+
+The atomic swap preserves the Primary Key (the old `mode("overwrite")` used to
+DROP the table and silently destroy it) and never exposes an empty table to Metabase.
+
+![Batch Processing Pipeline](images/luongbatch.png)
+
+> Sơ đồ PNG mô tả kiến trúc tổng quát; luồng batch hiện tại có thêm bước
+> "Landing → Bronze" như trên (cập nhật figure nằm trong Roadmap).
 
 ---
 
 ## ✨ Core Features
 
-- **Sub-second Distributed Stream Processing** — Processes high-throughput data streams from Kafka with minimal I/O overhead using Spark Structured Streaming micro-batches.
-- **Centralized Dead Letter Queue (DLQ)** — Automatically isolates and classifies malformed records (`Missing Customer ID`, `Invalid Amount`) into a single audit table for root-cause analysis.
-- **Automated Error Reprocessing** — A scheduled Airflow DAG recovers failed records, normalizes negative amounts to `0` (treated as promotional orders), and re-merges data directly into the Gold Layer.
-- **Idempotency Guarantee** — Overwrite-mode snapshots for Batch and post-recovery database purges ensure repeated pipeline executions never skew financial reports.
-- **Batched Telegram Alerts** — Dedicated bots for Streaming (`STREAMING_BOT`) and Batch (`BATCH_BOT`) pipelines. All VIP orders within a micro-batch are aggregated into a single HTTP POST payload, preventing Spark Driver thread-blocking and Telegram's HTTP 429 rate-limit errors.
+- **Real Medallion flow** — Bronze is written *and* read; Silver is populated by
+  both layers; Gold is derived from Silver (including recovered records).
+- **Idempotent writes everywhere** — UPSERT (`INSERT ... ON CONFLICT`) for
+  streaming sinks and recovery; anti-join append for batch Silver; transactional
+  staging swap for batch Gold. Re-running any job never skews reports.
+- **DLQ with a lifecycle** — `error_logs.status` (`unprocessed` → `processed`).
+  The recovery DAG reads *only* unprocessed rows it can fix, then marks exactly
+  the IDs it processed — no blind `DELETE`, no race window, no data loss.
+- **Refund-aware recovery** — negative amounts are recovered with their sign
+  preserved (a refund legitimately reduces revenue), instead of being forced to 0.
+- **Batched Telegram alerts** — one HTTP POST per micro-batch, avoiding driver
+  blocking and Telegram HTTP 429 rate limits; separate bots for Batch/Streaming.
+- **Null-safe quality routing** — NULL `amount`/`order_id` rows land in the DLQ
+  instead of silently vanishing from both sides of the filter (a real bug in the
+  previous version, now covered by regression tests).
+- **Operable compose stack** — Kafka KRaft (no Zookeeper), healthchecks +
+  `depends_on` conditions, restart policies, checkpoints on a host volume,
+  schema auto-init via `docker-entrypoint-initdb.d`, pinned dependencies baked
+  into the Spark image.
 
 ---
 
-## ⚡ Production Optimizations & Real Metrics
+## 📐 Data Quality & DLQ Lifecycle
 
-To ensure enterprise-grade stability under constrained containerized environments, the pipeline applies rigorous resource tuning and metadata pushdown techniques.
+Shared routing rules (single source in `src/transforms.py`, tested with pytest):
 
-### 1. Spark Shuffle & Resource Tuning
-- **Problem:** Spark's default `groupBy`/`window` operations create 200 shuffle partitions, overloading the internal Docker network I/O and RAM.
-- **Solution:** Explicitly tuned `spark.sql.shuffle.partitions = 4` to match the allocated CPU core count.
-- **Result:** **~85% reduction** in intermediate data processing time per micro-batch.
-
-### 2. Alert Batching & Backpressure Control
-- **Problem:** Firing individual HTTP requests per VIP order in a Streaming context blocks the Spark Driver thread and triggers `HTTP 429 Too Many Requests` from the Telegram API.
-- **Solution:** Implemented partition-level micro-batch alert aggregation. All qualifying VIP transactions within a micro-batch are compiled into a single unified payload.
-
-### 3. Columnar Storage & Metadata Pruning
-- **Problem:** Raw CSV logs require full-table scans for aggregations and incur heavy disk footprints.
-- **Solution:** Intermediate storage utilizes **Snappy-compressed Parquet** formats. Spark leverages **Predicate Pushdown** to filter invalid records directly at the file metadata layer before loading partitions into memory.
-- **Result:** **~75% disk space reduction** paired with minimal read I/O overhead.
-
-### 📊 Baseline System Metrics (Local Docker Environment)
-Performance verified on a localized testing cluster executing parallel workloads:
-
-| Metric Category | Observed Performance Target | Technical Context |
+| Condition | Classification | Destination |
 |---|---|---|
-| **Ingestion Throughput** | `~50 - 80 events/sec` | Sustained generation rate via local Python simulation driver. |
-| **End-to-End Latency** | `~10 - 15 seconds` | Measured from Kafka topic emission to post-commit Telegram VIP delivery. |
-| **Daily Storage Footprint** | `~450 MB` (Raw CSV) $\rightarrow$ `~110 MB` (Parquet) | Demonstrates structural compression efficiency inside the Landing zone. |
-| **Container Allocation** | **Spark Node:** `2 Cores, 4GB RAM` <br>**Kafka Broker:** `1 Core, 2GB RAM` <br>**Postgres DB:** `1 Core, 1.5GB RAM` | Minimum recommended baseline configurations for local Docker execution. |
+| `customer_id IS NULL` | `Missing Customer ID` | DLQ |
+| `amount IS NULL OR amount <= 0` | `Invalid Amount` | DLQ → recovery (refund semantics) |
+| `order_id IS NULL OR ''` | `Missing Order ID` | DLQ (manual review) |
+| `product_id IS NULL/'' ` (after trim) | `Missing Product ID` | DLQ |
+| otherwise | clean | Silver → Gold |
+
+Recovery (`reprocess_errors.py`, every 15 min): `status='unprocessed'` AND
+`Invalid Amount` → UPSERT into Silver with the original sign → refresh the minute
+view → mark `processed` for exactly the recovered IDs.
+
+---
+
+## ⚡ Engineering Optimizations & Honest Metrics
+
+- **`spark.sql.shuffle.partitions = 4`** tuned for the container's CPU count —
+  200 default partitions would choke the Docker network for tiny micro-batches.
+- **Micro-batch trigger = 10s** — matches alert batching and keeps JDBC round-trips sane.
+- **Snappy Parquet** as the intermediate batch format (columnar, compressed).
+- **Measured on the local stack** (no invented percentages — measure your own run):
+  - Producer rate: **~15–20 events/s** (bounded by `time.sleep(0.05)` — by design).
+  - End-to-end latency (event → Telegram/Gold): **~10–15 s** (micro-batch trigger).
+  - Container baseline: Spark node 1.5G, Kafka 1G, Postgres 512M, Metabase 2G.
+
+---
 
 ## 🛠 Technology Stack
 
 | Category | Technology |
 |---|---|
-| **Stream Processing** | Apache Spark 3.5.0 (PySpark), Structured Streaming |
-| **Message Queue** | Apache Kafka 3.7.0, Zookeeper 3.9.2 |
-| **Batch Orchestration** | Apache Airflow 2.9.0 (LocalExecutor) |
-| **Storage** | PostgreSQL 15-alpine (Medallion Architecture) |
-| **Visualization** | Metabase BI Engine |
-| **Infrastructure** | Docker & Docker Compose 3.8 |
-| **Language** | Python 3.8+ (`pandas`, `faker`, `psycopg2-binary`, `python-dotenv`) |
+| Stream Processing | Apache Spark 3.5.0 (PySpark), Structured Streaming |
+| Message Queue | Apache Kafka 3.7.0 (KRaft mode) |
+| Batch Orchestration | Apache Airflow 2.9.1 (LocalExecutor) |
+| Storage | PostgreSQL 15-alpine (Medallion) |
+| Visualization | Metabase |
+| Infrastructure | Docker Compose, `Dockerfile.spark` / `Dockerfile.airflow` |
+| Language | Python (pyspark, kafka-python, psycopg2, pandas, faker) — pinned in `requirements.txt` |
+| Testing / CI | pytest (+ PySpark local session), GitHub Actions |
 
 ---
 
@@ -128,77 +178,106 @@ Performance verified on a localized testing cluster executing parallel workloads
 
 ```text
 project-root/
-├── dags/                           # Airflow DAG definitions
-│   ├── reprocess_errors_dag.py     # DAG: automated error recovery (every 10 min)
-│   └── sales_pipeline_dag.py       # DAG: data generation + Batch ETL orchestration
+├── dags/
+│   ├── sales_pipeline_dag.py       # Landing CSV → Bronze ingest → Batch ETL (10 min)
+│   └── reprocess_errors_dag.py     # DLQ lifecycle recovery (15 min)
 │
-├── data/                           # Static data storage (CSV Landing, Parquet Silver)
+├── src/
+│   ├── db_utils.py                 # Config, JDBC parse, UPSERT/swap helpers (shared)
+│   ├── transforms.py               # Quality routing + Gold aggregations (shared, tested)
+│   ├── notify.py                   # Telegram helper (Batch/Streaming bots)
+│   ├── data_producer.py            # Kafka producer: keyed messages, acks=all, dirty data
+│   ├── ingest_csv_to_bronze.py     # Landing CSV → Bronze (convergence point)
+│   ├── etl_job.py                  # Bronze → Silver → Gold (atomic swap)
+│   ├── spark_streaming_job.py      # 5 streaming circuits (Bronze/Silver/Gold/Alert/DLQ)
+│   ├── reprocess_errors.py         # DLQ recovery + status lifecycle
+│   ├── gen_data.py                 # CSV landing generator
+│   └── gen_product_metadata.py     # Product catalog (idempotent — runs once)
 │
-├── logs/
-│   └── spark_streaming.log         # Real-time Streaming job logs
+├── tests/
+│   ├── test_db_utils.py            # Pure-Python unit tests (run anywhere)
+│   └── test_transforms.py          # PySpark local-session tests (CI runs these)
 │
-├── src/                            # Core application source code
-│   ├── data_producer.py            # Kafka producer: simulates real-time transactions + dirty data
-│   ├── etl_job.py                  # Batch ETL: Parquet optimization + DLQ routing
-│   ├── gen_data.py                 # Generates static CSV input for the Batch layer
-│   ├── gen_product_metadata.py     # Generates product catalog metadata
-│   ├── reprocess_errors.py         # Error recovery batch job + Data Purge logic
-│   └── spark_streaming_job.py      # Streaming engine: micro-batch processing + batched alerts
+├── docs/
+│   └── architecture-review.md      # Full review: gaps found + fix plan + status
 │
-├── .env                            # Environment variables (secrets — excluded via .gitignore)
-├── docker-compose.yaml             # Full infrastructure definition
-├── Dockerfile.airflow              # Custom Airflow worker image
-└── init-db.sql                     # PostgreSQL schema initialization script
+├── data/                           # Landing CSV + product catalog (idempotent)
+├── logs/ checkpoints/              # Runtime artifacts (gitignored)
+├── .github/workflows/ci.yml        # pytest + docker compose validation
+├── docker-compose.yaml
+├── Dockerfile.spark / Dockerfile.airflow
+├── init-db.sql                     # Medallion schema (auto-applied on first init)
+└── requirements.txt                # Pinned dependencies
 ```
----
-
-## 🧪 Quality Assurance & Testing Strategy
-
-To maintain pipeline integrity and avoid regressions during refactoring, the repository enforces continuous validation spanning unit, integration, and target metadata validation levels.
-
-- **Local Spark Execution Testing:** ETL transformations and windowed metrics can be executed directly on local machine environments utilizing lightweight PySpark local sessions (`master="local[2]"`) combined with the `pytest` framework, eliminating the need to spin up the full Docker infrastructure during logic verification.
-- **Unit & Integration Mapping:** Functional execution scripts assert targeted data extraction logic, guaranteeing that malformed configurations automatically trigger routing into the isolated DLQ structures.
-- **Data Validation Guardrails:** Runtime PySpark validation checks assert strict schema invariants at the boundaries of the Medallion structures (e.g., asserting `df.filter(col("amount") < 0).count() == 0` prior to writing downstream to the Silver layer).
 
 ---
 
-## ⚖️ Lambda Reconciliation & Eventual Consistency
+## 🧪 Quality Assurance & Testing
 
-A core architectural challenge in a Lambda infrastructure is maintaining analytical alignment between the real-time **Speed Layer** and the exhaustive **Batch Layer**.
+*(Phần này giờ đúng với code thật — trước đây là tuyên bố không có hồ sơ.)*
 
-![Lambda Reconciliation & Eventual Consistency](images/sodo2.png)
-*Figure 4: Lambda Reconciliation — Speed Layer divergence vs Batch Layer eventual convergence with idempotent conflict resolution.*
+- **Unit tests** (`pytest tests/`):
+  - `test_db_utils.py` — JDBC URL parsing, error handling (pure Python).
+  - `test_transforms.py` — quality routing (each error class + the NULL-vanish
+    regression) and Gold aggregation grains, on a local Spark session `local[2]`.
+- **Run locally:**
+  ```bash
+  .venv/Scripts/python -m pytest tests/ -v      # Windows
+  python3 -m pytest tests/ -v                   # Linux / macOS
+  ```
+  Machines where PySpark can't start (e.g. Windows paths containing `(` like
+  `New folder (2)` break Spark's batch scripts) gracefully **skip** the Spark
+  tests — CI runs them fully on Ubuntu + Java 17 + Python 3.11.
+- **CI** (`.github/workflows/ci.yml`): runs the full test suite and validates
+  `docker compose config` on every push/PR.
+- **Secret hygiene:** `pre-commit` + `detect-secrets` blocks credentials from
+  ever being committed. Install once: `pip install pre-commit && pre-commit install`.
 
-1. Target Synchronization & Convergence
-Real-Time Divergence: Short-term reporting metrics materialized inside gold_minute_revenue provide immediate operational awareness but may exhibit minor discrepancies due to unexpected network jitter, late-arriving packets, or un-enriched partial events.
+---
 
-Eventual Convergence: Full synchronization is achieved at 10-minute intervals driven by Airflow DAG orchestration. The primary Batch task (etl_job.py) bypasses volatile streaming buffers to process consolidated records directly from the immutable Bronze persistence layer.
+## ⚖️ Lambda Reconciliation (implemented, not just claimed)
 
-Conflict Resolution: Utilizing highly deterministic Idempotent Overwrites, the Batch layer replaces historical analytical aggregates. In the event of metric conflict, business intelligence tools configured inside Metabase enforce the Batch snapshot as the definitive Source of Truth.
+1. **Short-term divergence** — `gold_minute_revenue` reflects streaming windows
+   and may miss late/replayed events; that is acceptable for an operational view.
+2. **Eventual convergence** — every 10 minutes the batch DAG recomputes Gold from
+   Silver, which accumulates clean records from *both* layers plus recovered DLQ
+   rows. Bronze converges CSV landing and the stream in one immutable table.
+3. **Conflict resolution** — Gold Batch is rebuilt via a single-transaction
+   atomic swap; Metabase reads `gold_batch_revenue` as the Source of Truth.
+
+---
 
 ## 🚀 Quick Start
-Spin up the entire system locally in 3 steps:
 
-Bash
-# Step 1: Start all infrastructure containers in detached mode
-docker-compose up -d
+```bash
+# Step 1: start the whole stack (Postgres schema auto-initializes on first run)
+docker compose up -d --build
 
-# Step 2: Launch the real-time Spark Streaming job inside the Docker network
-docker exec -it newfolder2-spark-master-1 python3 /opt/spark/src/spark_streaming_job.py
+# Step 2: launch the streaming job inside the Docker network
+docker exec -it newfolder2-spark-master-1 spark-submit \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.2 \
+  /opt/spark/src/spark_streaming_job.py
 
-# Step 3: (New terminal on host) Activate the virtual environment and start the data producer
-# Windows (PowerShell)
-.\.venv\Scripts\activate
-python .\src\data_producer.py
+# Step 3: start the producer (inside the container — no host deps needed)
+docker exec -it newfolder2-spark-master-1 python3 /opt/spark/src/data_producer.py
+```
 
-# Linux / macOS
-source .venv/bin/activate
-python3 src/data_producer.py
-📖 Deployment Guide
-Step 1 — Configure Environment Variables
-Create a .env file in the project root. Copy the template below and fill in your credentials:
+Prefer running the producer on the host? Make sure `KAFKA_BOOTSTRAP_SERVERS`
+in `.env` points at `localhost:9092` for the host process (the Spark jobs need
+`kafka:29092` — that's why the in-container run is the default path).
 
-Đoạn mã
+Airflow UI: http://localhost:8085 (admin/admin) — unpause
+`sales_batch_optimization_v1` and `automated_data_recovery_job`.
+Metabase: http://localhost:3000 — point it at Postgres `postgres-db:5433`, db `sales_db`.
+
+---
+
+## 📖 Deployment Guide
+
+**Step 1 — Configure `.env`** (copy `.env.example`, fill real values — never
+commit the filled file):
+
+```env
 # Telegram — Batch Pipeline Alerts
 BATCH_BOT_TOKEN=<YOUR_TELEGRAM_BATCH_BOT_TOKEN>
 BATCH_CHAT_ID=<YOUR_TELEGRAM_BATCH_CHAT_ID>
@@ -207,67 +286,65 @@ BATCH_CHAT_ID=<YOUR_TELEGRAM_BATCH_CHAT_ID>
 STREAMING_BOT_TOKEN=<YOUR_TELEGRAM_STREAMING_BOT_TOKEN>
 STREAMING_CHAT_ID=<YOUR_TELEGRAM_STREAMING_CHAT_ID>
 
-# PostgreSQL
+# PostgreSQL (Medallion storage)
 DB_URL=jdbc:postgresql://postgres-db:5432/sales_db
 DB_USER=admin
 DB_PASS=<YOUR_POSTGRES_PASSWORD>
 DB_DRIVER=org.postgresql.Driver
 
-# Kafka
-# For local Docker environment
+# Kafka (inside Docker network)
 KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-
-# For external connections (if needed)
-# KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 KAFKA_TOPIC=sales_topic
-Step 2 — Start Infrastructure & Database Initialization
-Launch containers and initialize PostgreSQL schema via configured .env credentials:
-
-```bash
-docker-compose up -d
-Note: Execute the full init-db.sql script via any external SQL client on port 5433 (or internal 5432) to map tables correctly prior to execution.
-
-Step 3 — Enable Airflow Orchestration
-Access the UI at http://localhost:8085 (admin/admin) and unpause:
-
-sales_batch_optimization_v1
-
-automated_data_recovery_job
 ```
+
+**Step 2 — Start infrastructure**: `docker compose up -d --build`. The schema in
+`init-db.sql` is applied automatically the first time the Postgres volume is
+created (no manual SQL execution needed).
+
+**Step 3 — Enable Airflow DAGs** in the UI (see Quick Start).
+
 ---
 
 ## 🐛 Troubleshooting
-Cause: Default Spark Docker image omits the JDK jps utility.
-Fix: Update the DAG's check command to map Linux process tables directly:
 
-Bash
-ps -ef | grep org.apache.spark.deploy.master.Master | grep -v grep
-Cause: The error_logs table in PostgreSQL is missing the target enrichment key.
-Fix: Connect to PostgreSQL directly and patch the schema:
+- **Spark Master health check fails** — the Spark image omits the JDK `jps`
+  utility; the DAG maps the Linux process table instead:
+  `ps -ef | grep org.apache.spark.deploy.master.Master | grep -v grep`.
+- **PySpark won't start locally on Windows** — paths containing parentheses
+  (e.g. `New folder (2)`) break Spark's `.cmd` scripts
+  (`was unexpected at this time`). Rename the folder or run the tests in WSL/CI.
+- **Schema drift after an old version ran** — if your Postgres volume predates
+  this refactor (tables created by Spark without constraints), wipe the volume
+  (`docker compose down -v`) and start fresh so `init-db.sql` applies cleanly.
 
-SQL
-ALTER TABLE error_logs ADD COLUMN product_id VARCHAR(255);
-🔭 Roadmap
-[ ] High-Availability Kafka Cluster — 3-node Kafka cluster with Replication Factor = 2 and multi-worker Spark setup for fault tolerance.
+---
 
-[ ] Delta Lake Integration — Replace plain Parquet with Delta Lake for ACID compliance, concurrent write optimization, and Data Time Travel for audit trails.
+## 🔭 Roadmap
 
-[ ] dbt Transformation Layer — Add dbt on top of PostgreSQL for modular SQL transformations, automated data quality tests, and lineage documentation.
+- [ ] Update architecture figures to include the Landing → Bronze ingest step
+- [ ] Incremental batch processing (high-watermark on Bronze) instead of full recompute
+- [ ] Delta Lake for ACID + time travel on the Parquet layer
+- [ ] dbt for modular SQL transformations and lineage
+- [ ] High-Availability Kafka (RF=2) + multi-worker Spark
+- [ ] Schema Registry for the event payload contract
+
+---
 
 ## 📋 Prerequisites
-- Docker 20.10+ & Docker Compose 3.8+
-- Python 3.8+
-- Git
-- At least 8GB RAM (recommended 16GB for smooth operation)
 
+- Docker 20.10+ & Docker Compose v2
+- Python 3.8+ (for local tests)
+- Git (+ `pre-commit` recommended)
+- At least 8GB RAM (16GB recommended)
 
 ## 📝 License
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
-## 🤝 Contributing
-Contributions are welcome! Please feel free to submit a Pull Request.
+MIT — see [LICENSE](LICENSE).
 
 ## 👤 Author
-Đặng Bùi Thanh Tùng Final-year student — Data Engineering · Faculty of Information Technology · Dai Nam University
 
-This project serves as the capstone of my Data Engineering studies and as a stepping stone toward my career as a professional Data Engineer
+Đặng Bùi Thanh Tùng — Final-year student, Data Engineering · Faculty of
+Information Technology · Dai Nam University
+
+This project serves as the capstone of my Data Engineering studies and as a
+stepping stone toward my career as a professional Data Engineer.
