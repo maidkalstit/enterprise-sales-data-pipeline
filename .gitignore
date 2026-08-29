@@ -8,3 +8,6 @@ checkpoints/
 # Dữ liệu sinh ra trong lúc chạy pipeline — không đưa vào version control
 data/sales_data.csv
 data/sales_data.parquet/
+
+# Local security-scan artifacts (Mimosa audit history)
+.mimosa/
