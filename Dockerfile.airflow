@@ -8,4 +8,5 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 USER airflow
-RUN pip install --no-cache-dir pandas faker requests python-dotenv
+# Airflow không chạy python nghiệp vụ: mọi job đều chạy trong Spark container qua
+# docker exec (DAG dùng BashOperator) — chỉ cần Docker CLI đã cài phía trên.

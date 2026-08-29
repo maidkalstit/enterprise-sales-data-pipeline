@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS raw_sales_events (
 );
 
 -- 2. TẦNG SILVER: Dữ liệu đã làm sạch và ép kiểu (Schema-on-Write)
+-- Streaming UPSERT theo order_id; Batch chỉ append các order_id chưa tồn tại
+-- (idempotent — chạy lại không bao giờ nhân đôi dữ liệu)
 CREATE TABLE IF NOT EXISTS clean_sales_events (
     order_id VARCHAR(255) PRIMARY KEY,
     customer_id VARCHAR(255),
@@ -30,7 +32,9 @@ CREATE TABLE IF NOT EXISTS gold_minute_revenue (
     PRIMARY KEY (window_start, product_id)
 );
 
--- 4. TẦNG GOLD (BATCH LAYER): Bảng đệm (Staging) phục vụ luồng ghi nguyên tử
+-- 4. TẦNG GOLD (BATCH LAYER): Bảng đệm (Staging) — etl_job ghi aggregation vào
+-- đây, rồi atomic_swap_gold() đẩy sang gold_batch_revenue trong MỘT transaction
+-- (thay cho mode="overwrite" cũ — thứ từng DROP table và xé mất Primary Key)
 CREATE TABLE IF NOT EXISTS gold_batch_revenue_staging (
     report_date DATE NOT NULL,
     product_id VARCHAR(255) NOT NULL,
@@ -61,3 +65,7 @@ CREATE TABLE IF NOT EXISTS error_logs (
     status VARCHAR(20) DEFAULT 'unprocessed', -- 'unprocessed' hoặc 'processed'
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Index phục vụ quét vòng đời DLQ (reprocess_errors đọc WHERE status = 'unprocessed')
+CREATE INDEX IF NOT EXISTS idx_error_logs_status ON error_logs (status);
+CREATE INDEX IF NOT EXISTS idx_error_logs_reason ON error_logs (error_reason);
