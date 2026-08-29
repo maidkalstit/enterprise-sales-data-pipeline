@@ -1,6 +1,9 @@
 -- ==============================================================================
 -- KỊCH BẢN KHỞI TẠO CẤU TRÚC CƠ SỞ DỮ LIỆU CHUẨN MEDALLION (DATABASE SCHEMA)
 -- ==============================================================================
+-- Quy ước tiền tệ: MỌI cột tiền (amount / total_revenue) dùng NUMERIC(12,2) —
+-- tuyệt đối không dùng float/DOUBLE PRECISION (mất chính xác từng xu khi cộng dồn).
+-- ==============================================================================
 
 -- 1. TẦNG BRONZE: Lưu trữ dữ liệu thô (Schema-on-Read)
 CREATE TABLE IF NOT EXISTS raw_sales_events (
@@ -16,7 +19,7 @@ CREATE TABLE IF NOT EXISTS clean_sales_events (
     order_id VARCHAR(255) PRIMARY KEY,
     customer_id VARCHAR(255),
     product_id VARCHAR(255),
-    amount DOUBLE PRECISION,
+    amount NUMERIC(12,2),
     order_date TIMESTAMP,
     processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -27,7 +30,7 @@ CREATE TABLE IF NOT EXISTS gold_minute_revenue (
     window_start TIMESTAMP NOT NULL,
     window_end TIMESTAMP NOT NULL,
     product_id VARCHAR(255) NOT NULL,
-    total_revenue DOUBLE PRECISION NOT NULL,
+    total_revenue NUMERIC(12,2) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (window_start, product_id)
 );
@@ -38,7 +41,7 @@ CREATE TABLE IF NOT EXISTS gold_minute_revenue (
 CREATE TABLE IF NOT EXISTS gold_batch_revenue_staging (
     report_date DATE NOT NULL,
     product_id VARCHAR(255) NOT NULL,
-    total_revenue DOUBLE PRECISION NOT NULL,
+    total_revenue NUMERIC(12,2) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -46,7 +49,7 @@ CREATE TABLE IF NOT EXISTS gold_batch_revenue_staging (
 CREATE TABLE IF NOT EXISTS gold_batch_revenue (
     report_date DATE NOT NULL,
     product_id VARCHAR(255) NOT NULL,
-    total_revenue DOUBLE PRECISION NOT NULL,
+    total_revenue NUMERIC(12,2) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (report_date, product_id)
 );
@@ -58,7 +61,7 @@ CREATE TABLE IF NOT EXISTS error_logs (
     order_id VARCHAR(255),
     customer_id VARCHAR(255),
     product_id VARCHAR(255),
-    amount DOUBLE PRECISION,
+    amount NUMERIC(12,2),
     order_date TIMESTAMP,
     error_reason VARCHAR(255),
     source_type VARCHAR(50), 

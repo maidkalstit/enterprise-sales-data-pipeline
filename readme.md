@@ -121,6 +121,9 @@ DROP the table and silently destroy it) and never exposes an empty table to Meta
 - **Null-safe quality routing** — NULL `amount`/`order_id` rows land in the DLQ
   instead of silently vanishing from both sides of the filter (a real bug in the
   previous version, now covered by regression tests).
+- **Exact money arithmetic** — every currency column is `NUMERIC(12,2)` end-to-end
+  (Spark `DecimalType` casts + Postgres `NUMERIC`); floats never touch money, so
+  aggregated revenue is penny-exact.
 - **Operable compose stack** — Kafka KRaft (no Zookeeper), healthchecks +
   `depends_on` conditions, restart policies, checkpoints on a host volume,
   schema auto-init via `docker-entrypoint-initdb.d`, pinned dependencies baked
@@ -200,6 +203,9 @@ project-root/
 │
 ├── docs/
 │   └── architecture-review.md      # Full review: gaps found + fix plan + status
+│
+├── migrations/
+│   └── 001_amount_to_numeric.sql   # Live-DB migration (money columns → NUMERIC)
 │
 ├── data/                           # Landing CSV + product catalog (idempotent)
 ├── logs/ checkpoints/              # Runtime artifacts (gitignored)

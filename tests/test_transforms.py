@@ -60,6 +60,16 @@ def test_clean_rows_route_to_silver_side(spark):
     assert error.count() == 0
 
 
+def test_amount_is_cast_to_decimal_for_money(spark):
+    """Tiền tệ phải là DECIMAL(12,2) — cấm float chạm vào cột amount."""
+    clean, error = split_quality(
+        make_df(spark, [("ORD-1", "CUST-1", "1", 120.5, "2026-08-29 10:00:00")]),
+        source_type="Streaming",
+    )
+    assert clean.schema["amount"].dataType.simpleString() == "decimal(12,2)"
+    assert error.schema["amount"].dataType.simpleString() == "decimal(12,2)"
+
+
 def test_missing_customer_id_classified(spark):
     _, error = split_quality(
         make_df(spark, [("ORD-1", None, "1", 120.5, "2026-08-29 10:00:00")]),
@@ -148,7 +158,7 @@ def test_gold_daily_aggregation_sums_per_date_product(spark):
     clean, _ = split_quality(make_df(spark, rows), source_type="Batch")
     gold = aggregate_gold_daily(clean)
     collected = {
-        (r["report_date"].isoformat(), r["product_id"]): r["total_revenue"]
+        (r["report_date"].isoformat(), r["product_id"]): float(r["total_revenue"])
         for r in gold.collect()
     }
     assert collected[("2026-08-29", "1")] == pytest.approx(150.0)
@@ -165,7 +175,7 @@ def test_gold_minute_aggregation_includes_product_grain(spark):
     ]
     clean, _ = split_quality(make_df(spark, rows), source_type="Streaming")
     gold = aggregate_gold_minute(clean)
-    collected = {(r["window_start"], r["product_id"]): r["total_revenue"] for r in gold.collect()}
+    collected = {(r["window_start"], r["product_id"]): float(r["total_revenue"]) for r in gold.collect()}
 
     assert len(collected) == 2  # 2 sản phẩm trong cùng cửa sổ 1 phút
     assert sum(collected.values()) == pytest.approx(180.0)

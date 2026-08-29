@@ -11,6 +11,9 @@ một rules):
   - order_id NULL hoặc rỗng     → 'Missing Order ID'
   - product_id NULL/rỗng        → 'Missing Product ID' (đảm bảo bản ghi vào
                                    gold_minute_revenue không vi phạm NOT NULL)
+
+Mọi bản ghi ra khỏi hàm này có amount kiểu DECIMAL(12,2): tiền tệ không bao giờ
+lưu bằng float — DOUBLE PRECISION làm lệch doanh thu từng xu khi cộng dồn.
 """
 import pyspark.sql.functions as F
 
@@ -49,9 +52,12 @@ def split_quality(parsed_df, source_type):
         .withColumn("error_reason", F.expr(ERROR_REASON_CASE))
         .withColumn("source_type", F.lit(source_type))
         .withColumn("order_date", F.to_timestamp(F.col("order_date")))
+        .withColumn("amount", F.col("amount").cast("decimal(12,2)"))
     )
-    clean_df = normalized.filter(~is_bad).withColumn(
-        "order_date", F.to_timestamp(F.col("order_date"))
+    clean_df = (
+        normalized.filter(~is_bad)
+        .withColumn("order_date", F.to_timestamp(F.col("order_date")))
+        .withColumn("amount", F.col("amount").cast("decimal(12,2)"))
     )
     return clean_df, error_df
 
@@ -69,7 +75,7 @@ def aggregate_gold_minute(clean_df):
             F.col("window.start").alias("window_start"),
             F.col("window.end").alias("window_end"),
             F.col("product_id"),
-            F.col("total_revenue"),
+            F.col("total_revenue").cast("decimal(12,2)"),
         )
     )
 
@@ -78,5 +84,5 @@ def aggregate_gold_daily(clean_df):
     """Tổng hợp doanh thu theo (ngày, sản phẩm) — grain của gold_batch_revenue."""
     return (
         clean_df.groupBy(F.to_date(F.col("order_date")).alias("report_date"), F.col("product_id"))
-        .agg(F.sum("amount").alias("total_revenue"))
+        .agg(F.sum("amount").cast("decimal(12,2)").alias("total_revenue"))
     )
