@@ -2,3 +2,9 @@
 __pycache__/
 .venv/
 logs/
+checkpoints/
+.pytest_cache/
+
+# Dữ liệu sinh ra trong lúc chạy pipeline — không đưa vào version control
+data/sales_data.csv
+data/sales_data.parquet/

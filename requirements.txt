@@ -1,0 +1,23 @@
+# ==============================================================================
+# Python dependencies — pin theo đúng phiên bản đã kiểm chứng trong repo này.
+#
+#   Host (data producer):     kafka-python, python-dotenv
+#   Spark container (image):  requests, python-dotenv, psycopg2-binary,
+#                             pandas, faker, kafka-python  (xem Dockerfile.spark)
+#   Dev / CI / test:          pyspark, pytest, chispa
+# ==============================================================================
+
+# --- Runtime: Kafka producer (chạy được cả trong container lẫn trên host)
+kafka-python==2.3.1
+python-dotenv==1.2.2
+
+# --- Runtime: bên trong Spark container (Dockerfile.spark cài nhóm này)
+requests==2.33.1
+psycopg2-binary==2.9.10
+pandas==2.2.3
+faker==40.15.0
+
+# --- Dev / Test (Spark local session + pytest + so sánh DataFrame)
+pyspark==3.5.1
+pytest>=8,<9
+chispa>=0.9.4,<0.11
