@@ -7,8 +7,6 @@ Nâng cấp so với bản cũ:
     chỉ cần .env trỏ đúng listener tương ứng.
   - Message có KEY = customer_id (cùng khách hàng về cùng partition → đúng
     thứ tự giao dịch của từng khách) và acks='all' (độ bền gửi).
-  - Sửa bug injection: trước đây nhánh lỗi order_id dùng lại ngưỡng
-    error_chance < 0.02 sau nhánh < 0.03 → không bao giờ chạy.
 
 Ghi chú: random module dùng CỐ Ý — dữ liệu mô phỏng, không phải ngữ cảnh mật mã.
 """
