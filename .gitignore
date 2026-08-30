@@ -14,3 +14,5 @@ data/sales_data.parquet/
 
 # Private notes — không bao giờ lên GitHub
 RETROSPECTIVE.md
+
+docs/
