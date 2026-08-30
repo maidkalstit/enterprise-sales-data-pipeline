@@ -274,7 +274,9 @@ in `.env` points at `localhost:9092` for the host process (the Spark jobs need
 
 Airflow UI: http://localhost:8085 (admin/admin) — unpause
 `sales_batch_optimization_v1` and `automated_data_recovery_job`.
-Metabase: http://localhost:3000 — point it at Postgres `postgres-db:5433`, db `sales_db`.
+Metabase: http://localhost:3000 — point it at Postgres **`postgres-db:5432`**
+(Metabase nằm trong cùng mạng compose nên dùng hostname nội bộ — port host-mapped
+`localhost:5433` chỉ dành cho tool trên máy, vd DBeaver), db `sales_db`.
 
 ---
 
