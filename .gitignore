@@ -11,3 +11,6 @@ data/sales_data.parquet/
 
 # Local security-scan artifacts (Mimosa audit history)
 .mimosa/
+
+# Private notes — không bao giờ lên GitHub
+RETROSPECTIVE.md
