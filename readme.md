@@ -154,7 +154,9 @@ view → mark `processed` for exactly the recovered IDs.
 - **`spark.sql.shuffle.partitions = 4`** tuned for the container's CPU count —
   200 default partitions would choke the Docker network for tiny micro-batches.
 - **Micro-batch trigger = 10s** — matches alert batching and keeps JDBC round-trips sane.
-- **Snappy Parquet** as the intermediate batch format (columnar, compressed).
+- **Immutable Bronze persistence** — the original thesis's intermediate Parquet
+  snapshot was superseded by `raw_sales_events`, where streaming and CSV landing
+  converge; reprocessing never re-reads volatile files.
 - **Measured on the local stack** (no invented percentages — measure your own run):
   - Producer rate: **~15–20 events/s** (bounded by `time.sleep(0.05)` — by design).
   - End-to-end latency (event → Telegram/Gold): **~10–15 s** (micro-batch trigger).
@@ -331,7 +333,7 @@ created (no manual SQL execution needed).
 
 - [ ] Update architecture figures to include the Landing → Bronze ingest step
 - [ ] Incremental batch processing (high-watermark on Bronze) instead of full recompute
-- [ ] Delta Lake for ACID + time travel on the Parquet layer
+- [ ] Delta Lake for ACID + time travel on the Bronze/Silver layers
 - [ ] dbt for modular SQL transformations and lineage
 - [ ] High-Availability Kafka (RF=2) + multi-worker Spark
 - [ ] Schema Registry for the event payload contract
