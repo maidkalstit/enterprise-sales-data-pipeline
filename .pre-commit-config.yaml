@@ -1,5 +1,4 @@
-# Chặn secret (token Telegram/DB) ngay trước khi kịp commit —
-# đây là lớp phòng chống lại cảnh báo "leaked key" của GitHub Push Protection.
+
 # Cài một lần:  pip install pre-commit && pre-commit install
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
