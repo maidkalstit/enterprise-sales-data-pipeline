@@ -1,14 +1,6 @@
 """
 Kafka Producer — mô phỏng giao dịch bán hàng theo thời gian thực.
-
-Nâng cấp so với bản cũ:
-  - Đọc cấu hình từ .env (KAFKA_BOOTSTRAP_SERVERS / KAFKA_TOPIC) thay vì
-    hardcode localhost:9092. Chạy được cả trong container lẫn trên host —
-    chỉ cần .env trỏ đúng listener tương ứng.
-  - Message có KEY = customer_id (cùng khách hàng về cùng partition → đúng
-    thứ tự giao dịch của từng khách) và acks='all' (độ bền gửi).
-
-Ghi chú: random module dùng CỐ Ý — dữ liệu mô phỏng, không phải ngữ cảnh mật mã.
+Ghi chú: random module dùng chủ động— dữ liệu mô phỏng.
 """
 import json
 import os

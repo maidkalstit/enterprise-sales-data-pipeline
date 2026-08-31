@@ -2,9 +2,6 @@
 Landing → Bronze: đưa log giao dịch tĩnh (sales_data.csv) vào CÙNG tầng Bronze
 raw_sales_events với stream, ở dạng JSON payload thống nhất.
 
-Đây là mảnh ghép khiến câu chuyện "Lambda convergence" thành thật: cả hai ngóc
-ngào dữ liệu (stream Kafka + CSV landing) đều hội tụ về một Bronze tích lũy,
-Batch Layer chỉ cần đọc một chỗ.
 """
 import pyspark.sql.functions as F
 from pyspark.sql import SparkSession

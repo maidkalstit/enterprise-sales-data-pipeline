@@ -3,8 +3,8 @@ Sinh log giao dịch tĩnh CSV (Landing) cho Batch layer — chạy mỗi chu k�
 sales_pipeline_dag, sau đó ingest_csv_to_bronze.py đưa về cùng tầng Bronze
 với stream. Gửi tin thông báo qua Batch bot (dùng chung notify.py).
 
-Ghi chú: random/faker được dùng CỐ Ý — đây là dữ liệu MÔ PHỎNG cho demo,
-không phải ngữ cảnh mật mã nên không cần secrets module.
+Ghi chú: random/faker -  đây là dữ liệu MÔ PHỎNG cho demo,
+
 """
 import os
 import random

@@ -1,11 +1,6 @@
 """
 db_utils — lớp dùng chung cho mọi job Spark khi đụng tới PostgreSQL.
 
-Gồm: nạp cấu hình .env (có phòng thủ), phân giải JDBC URL sang tham số
-psycopg2, các câu UPSERT idempotent (Silver, Gold-minute), đóng dấu vòng
-lifecycle DLQ và atomic swap cho Gold Batch. Mọi job (streaming / batch /
-recovery) đều đi qua đây để hành vi ghi nhất quán trên toàn pipeline.
-
 An toàn SQL: mỗi câu lệnh là chuỗi literal viết ngay tại chỗ gọi, dữ liệu
 luôn truyền qua placeholder %s — không ghép chuỗi, không SQL động.
 """

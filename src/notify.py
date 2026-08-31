@@ -1,6 +1,6 @@
 """
 notify — gọn một chỗ cho mọi gửi tin Telegram (Batch bot / Streaming bot).
-Trước đây 3 file mỗi nơi một hàm send_telegram_msg riêng — giờ về một cửa.
+
 """
 import os
 

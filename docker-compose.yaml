@@ -1,15 +1,3 @@
-# =============================================================================
-# STACK PIPELINE BÁN HÀNG — MEDALLION / LAMBDA (bản đã sửa theo architecture-review)
-# Thay đổi chính so với bản cũ:
-#   - BỎ Zookeeper: Kafka 3.7 chạy KRaft (trước đây kéo theo xác chết 384MB RAM)
-#   - Spark build từ Dockerfile.spark — dependency pin trong image, không còn
-#     `pip install` lúc start (chậm, cần mạng, không tái lập được)
-#   - Healthcheck + depends_on condition + restart policy cho toàn stack
-#   - Checkpoint streaming nằm trên bind volume ./checkpoints (trước đây nằm
-#     trong container → recreate là mất offset)
-#   - init-db.sql tự chạy lần đầu khi volume Postgres trống (initdb.d)
-#   - Bỏ SPARK_SUBMIT_PARAMETERS (không ai tiêu thụ) và các mount thừa trên Airflow
-# =============================================================================
 
 services:
 

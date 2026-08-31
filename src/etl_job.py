@@ -1,14 +1,7 @@
 """
-Batch ETL — thực thi Medallion đúng nghĩa: Bronze → Silver → Gold.
+Batch ETL — thực thi Medallion : Bronze → Silver → Gold.
 
-Khác bản cũ (đọc CSV → ghi thẳng gold bằng mode="overwrite"):
-  1. Đọc dữ liệu ĐÃ TÍCH LŨY từ raw_sales_events (Bronze) — điểm hội tụ của cả
-     stream lẫn CSV landing, hết cảnh "Gold chỉ còn snapshot 10 phút".
-  2. Ghi bản ghi sạch vào Silver clean_sales_events bằng append-các-dòng-mới
-     (left_anti-join theo order_id) — idempotent, chạy lại không nhân đôi.
-  3. Gold được TÍNH LẠI từ Silver, ghi vào bảng staging rồi atomic swap trong
-     một transaction — Primary Key được bảo toàn, Metabase không bao giờ thấy
-     bảng rỗng lửng (mode="overwrite" cũ từng DROP table và xé mất PK).
+
 """
 import pyspark.sql.functions as F
 from pyspark.sql import SparkSession

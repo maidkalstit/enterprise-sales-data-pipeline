@@ -1,12 +1,4 @@
--- ==============================================================================
--- Migration 001: tiền tệ NEVER float — DOUBLE PRECISION → NUMERIC(12,2)
--- Áp dụng cho DB ĐANG CHẠY (không cần wipe volume).
--- Nếu đã `docker compose down -v` SAU commit này thì khỏi chạy: init-db.sql
--- đã áp dụng sẵn NUMERIC(12,2) từ đầu.
---
--- Cách chạy (PowerShell):
---   Get-Content migrations\001_amount_to_numeric.sql -Raw | docker exec -i newfolder2-postgres-db-1 psql -U admin -d sales_db
--- ==============================================================================
+
 
 BEGIN;
 
