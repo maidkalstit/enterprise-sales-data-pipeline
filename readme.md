@@ -222,8 +222,6 @@ project-root/
 
 ## 🧪 Quality Assurance & Testing
 
-*(Phần này giờ đúng với code thật — trước đây là tuyên bố không có hồ sơ.)*
-
 - **Unit tests** (`pytest tests/`):
   - `test_db_utils.py` — JDBC URL parsing, error handling (pure Python).
   - `test_transforms.py` — quality routing (each error class + the NULL-vanish
